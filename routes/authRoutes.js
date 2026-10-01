@@ -5,8 +5,10 @@ const { registerUser, loginUser } = require('../controllers/authController');
 const { protect, adminOnly } = require('../middleware/authMiddleware');
 
 // @route   POST /api/auth/login
-// @desc    Authenticate user & get JWT token (Public)
+// @route   POST /api/auth/admin/login
+// @desc    Authenticate user/admin & get token
 router.post('/login', loginUser);
+router.post('/admin/login', loginUser);
 
 // @route   POST /api/auth/register
 // @desc    Register a new user (Protected: Admin Only)

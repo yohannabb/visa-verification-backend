@@ -18,17 +18,28 @@ cloudinary.config({
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'visa_verification_docs', // Folder name inside Cloudinary
-    allowed_formats: ['jpg', 'jpeg', 'png', 'pdf'],
+    folder: 'visa_verification_docs', // Folder name in Cloudinary account
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf'],
   },
 });
 
 const upload = multer({ storage });
 
+// Helper to safely parse dates without saving "Invalid Date"
+const parseDate = (dateStr) => {
+  if (!dateStr) return undefined;
+  const parsed = new Date(dateStr);
+  return isNaN(parsed.getTime()) ? undefined : parsed;
+};
+
 // 3. Admin Login Endpoint
 router.post('/admin/login', (req, res) => {
   const { username, password } = req.body;
-  if (username === 'admin' && password === 'admin123') {
+  
+  const adminUser = process.env.ADMIN_USERNAME || 'admin';
+  const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
+
+  if (username === adminUser && password === adminPass) {
     return res.status(200).json({ success: true, message: 'Authenticated successfully' });
   }
   return res.status(401).json({ success: false, message: 'Invalid Admin Credentials' });
@@ -59,7 +70,10 @@ router.post(
       } = req.body;
 
       if (!passcode || !fullName || !passportNumber || !visaNumber) {
-        return res.status(400).json({ success: false, message: 'Required fields are missing.' });
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Required fields are missing (Passcode, Full Name, Passport, or Visa Number).' 
+        });
       }
 
       const existing = await Visa.findOne({ passcode: passcode.trim() });
@@ -70,23 +84,23 @@ router.post(
         });
       }
 
-      // Cloudinary automatically returns secure web URLs in path
-      const photoUrl = req.files?.photo?.[0] ? req.files.photo[0].path : '';
-      const attachedDocUrl = req.files?.attachedDoc?.[0] ? req.files.attachedDoc[0].path : '';
-      const visaCardImageUrl = req.files?.visaCardImage?.[0] ? req.files.visaCardImage[0].path : '';
+      // Extract full HTTPS Cloudinary URLs safely from req.files
+      const photoUrl = req.files?.photo?.[0]?.path || '';
+      const attachedDocUrl = req.files?.attachedDoc?.[0]?.path || '';
+      const visaCardImageUrl = req.files?.visaCardImage?.[0]?.path || '';
 
       const newVisa = new Visa({
-        fullName,
-        nationality,
+        fullName: fullName.trim(),
+        nationality: nationality ? nationality.trim() : 'ETHIOPIA',
         passcode: passcode.trim(),
-        visaNumber,
-        passportNumber,
+        visaNumber: visaNumber.trim(),
+        passportNumber: passportNumber.trim(),
         visaType,
         occupation,
         gender,
-        birthDate: birthDate ? new Date(birthDate) : undefined,
-        issueDate: issueDate ? new Date(issueDate) : undefined,
-        expiryDate: expiryDate ? new Date(expiryDate) : undefined,
+        birthDate: parseDate(birthDate),
+        issueDate: parseDate(issueDate),
+        expiryDate: parseDate(expiryDate),
         photoUrl,
         attachedDocUrl,
         visaCardImageUrl,
@@ -101,23 +115,112 @@ router.post(
       });
     } catch (error) {
       console.error('Registration error:', error);
-      return res.status(500).json({ success: false, message: error.message || 'Failed to register visa record.' });
+      
+      // Handle Mongo Duplicate Key Error (code 11000)
+      if (error.code === 11000) {
+        const duplicateField = Object.keys(error.keyPattern || {})[0] || 'field';
+        return res.status(400).json({ 
+          success: false, 
+          message: `A record with this ${duplicateField} already exists.` 
+        });
+      }
+
+      return res.status(500).json({ 
+        success: false, 
+        message: error.message || 'Failed to register visa record.' 
+      });
     }
   }
 );
 
-// 5. Verification Endpoint
+// 5. Public Verification Endpoint (Search by Passcode or Visa Number)
 router.post('/verify', async (req, res) => {
   try {
-    const { passcode } = req.body;
-    if (!passcode) return res.status(400).json({ success: false, message: 'Passcode is required.' });
+    const { passcode, visaNumber, passportNumber } = req.body;
 
-    const visaRecord = await Visa.findOne({ passcode: passcode.trim() });
-    if (!visaRecord) return res.status(404).json({ success: false, message: 'Invalid passcode or visa record not found.' });
+    const query = {};
+    if (passcode) query.passcode = passcode.trim();
+    if (visaNumber) query.visaNumber = visaNumber.trim();
+    if (passportNumber) query.passportNumber = passportNumber.trim();
+
+    if (Object.keys(query).length === 0) {
+      return res.status(400).json({ success: false, message: 'Please provide search criteria.' });
+    }
+
+    const visaRecord = await Visa.findOne(query);
+    if (!visaRecord) {
+      return res.status(404).json({ success: false, message: 'No visa record found matching the details provided.' });
+    }
 
     return res.status(200).json({ success: true, data: visaRecord });
   } catch (error) {
+    console.error('Verification error:', error);
     return res.status(500).json({ success: false, message: 'Server error during verification.' });
+  }
+});
+
+// 6. Get All Visas Endpoint (Admin Dashboard List)
+router.get('/all', async (req, res) => {
+  try {
+    const records = await Visa.find().sort({ createdAt: -1 });
+    return res.status(200).json({ success: true, count: records.length, data: records });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to retrieve visa records.' });
+  }
+});
+
+// 7. Update Existing Visa Record
+router.put(
+  '/:id',
+  upload.fields([
+    { name: 'photo', maxCount: 1 },
+    { name: 'attachedDoc', maxCount: 1 },
+    { name: 'visaCardImage', maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const existingRecord = await Visa.findById(id);
+
+      if (!existingRecord) {
+        return res.status(404).json({ success: false, message: 'Visa record not found.' });
+      }
+
+      const updateData = { ...req.body };
+
+      // Parse dates if provided
+      if (req.body.birthDate) updateData.birthDate = parseDate(req.body.birthDate);
+      if (req.body.issueDate) updateData.issueDate = parseDate(req.body.issueDate);
+      if (req.body.expiryDate) updateData.expiryDate = parseDate(req.body.expiryDate);
+
+      // Overwrite URLs if new files were uploaded
+      if (req.files?.photo?.[0]?.path) updateData.photoUrl = req.files.photo[0].path;
+      if (req.files?.attachedDoc?.[0]?.path) updateData.attachedDocUrl = req.files.attachedDoc[0].path;
+      if (req.files?.visaCardImage?.[0]?.path) updateData.visaCardImageUrl = req.files.visaCardImage[0].path;
+
+      const updatedVisa = await Visa.findByIdAndUpdate(id, updateData, { new: true });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Visa record updated successfully.',
+        data: updatedVisa,
+      });
+    } catch (error) {
+      return res.status(500).json({ success: false, message: error.message || 'Update failed.' });
+    }
+  }
+);
+
+// 8. Delete Visa Record Endpoint
+router.delete('/:id', async (req, res) => {
+  try {
+    const deleted = await Visa.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Record not found.' });
+    }
+    return res.status(200).json({ success: true, message: 'Visa record deleted successfully.' });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to delete visa record.' });
   }
 });
 
