@@ -18,7 +18,7 @@ cloudinary.config({
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'visa_verification_docs', // Folder name in Cloudinary account
+    folder: 'visa_verification_docs', // Folder name inside Cloudinary
     allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf'],
   },
 });
@@ -32,17 +32,28 @@ const parseDate = (dateStr) => {
   return isNaN(parsed.getTime()) ? undefined : parsed;
 };
 
-// 3. Admin Login Endpoint
+// 3. Admin Login Endpoint (Supports email, username, and fallback defaults)
 router.post('/admin/login', (req, res) => {
-  const { username, password } = req.body;
-  
-  const adminUser = process.env.ADMIN_USERNAME || 'admin';
+  const loginIdentifier = (req.body.email || req.body.username || '').toString().trim().toLowerCase();
+  const password = (req.body.password || '').toString().trim();
+
+  // Allowed credentials from environment or defaults
+  const adminEmail = (process.env.ADMIN_EMAIL || 'admin@gmail.com').toLowerCase();
+  const adminUser = (process.env.ADMIN_USERNAME || 'admin').toLowerCase();
   const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
 
-  if (username === adminUser && password === adminPass) {
-    return res.status(200).json({ success: true, message: 'Authenticated successfully' });
+  if ((loginIdentifier === adminEmail || loginIdentifier === adminUser) && password === adminPass) {
+    return res.status(200).json({
+      success: true,
+      message: 'Authenticated successfully',
+      token: 'admin-auth-token-valid',
+    });
   }
-  return res.status(401).json({ success: false, message: 'Invalid Admin Credentials' });
+
+  return res.status(401).json({
+    success: false,
+    message: 'Invalid admin email/username or password.',
+  });
 });
 
 // 4. Register New Visa Record Endpoint
@@ -70,13 +81,15 @@ router.post(
       } = req.body;
 
       if (!passcode || !fullName || !passportNumber || !visaNumber) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Required fields are missing (Passcode, Full Name, Passport, or Visa Number).' 
+        return res.status(400).json({
+          success: false,
+          message: 'Required fields are missing (Passcode/OTP, Full Name, Passport, or Visa Number).',
         });
       }
 
-      const existing = await Visa.findOne({ passcode: passcode.trim() });
+      const cleanPasscode = passcode.toString().trim();
+
+      const existing = await Visa.findOne({ passcode: cleanPasscode });
       if (existing) {
         return res.status(400).json({
           success: false,
@@ -84,7 +97,7 @@ router.post(
         });
       }
 
-      // Extract full HTTPS Cloudinary URLs safely from req.files
+      // Extract full Cloudinary HTTPS URLs safely
       const photoUrl = req.files?.photo?.[0]?.path || '';
       const attachedDocUrl = req.files?.attachedDoc?.[0]?.path || '';
       const visaCardImageUrl = req.files?.visaCardImage?.[0]?.path || '';
@@ -92,9 +105,9 @@ router.post(
       const newVisa = new Visa({
         fullName: fullName.trim(),
         nationality: nationality ? nationality.trim() : 'ETHIOPIA',
-        passcode: passcode.trim(),
-        visaNumber: visaNumber.trim(),
-        passportNumber: passportNumber.trim(),
+        passcode: cleanPasscode,
+        visaNumber: visaNumber.toString().trim(),
+        passportNumber: passportNumber.toString().trim(),
         visaType,
         occupation,
         gender,
@@ -115,51 +128,87 @@ router.post(
       });
     } catch (error) {
       console.error('Registration error:', error);
-      
-      // Handle Mongo Duplicate Key Error (code 11000)
+
       if (error.code === 11000) {
         const duplicateField = Object.keys(error.keyPattern || {})[0] || 'field';
-        return res.status(400).json({ 
-          success: false, 
-          message: `A record with this ${duplicateField} already exists.` 
+        return res.status(400).json({
+          success: false,
+          message: `A record with this ${duplicateField} already exists.`,
         });
       }
 
-      return res.status(500).json({ 
-        success: false, 
-        message: error.message || 'Failed to register visa record.' 
+      return res.status(500).json({
+        success: false,
+        message: error.message || 'Failed to register visa record.',
       });
     }
   }
 );
 
-// 5. Public Verification Endpoint (Search by Passcode or Visa Number)
+// 5. Public Verification / OTP Search Endpoint
 router.post('/verify', async (req, res) => {
   try {
-    const { passcode, visaNumber, passportNumber } = req.body;
+    // Check all possible field names sent from various frontend components
+    const inputPasscode = (
+      req.body.passcode ||
+      req.body.otp ||
+      req.body.code ||
+      req.body.accessCode ||
+      ''
+    )
+      .toString()
+      .trim();
 
-    const query = {};
-    if (passcode) query.passcode = passcode.trim();
-    if (visaNumber) query.visaNumber = visaNumber.trim();
-    if (passportNumber) query.passportNumber = passportNumber.trim();
+    const visaNumber = (req.body.visaNumber || '').toString().trim();
+    const passportNumber = (req.body.passportNumber || '').toString().trim();
 
-    if (Object.keys(query).length === 0) {
-      return res.status(400).json({ success: false, message: 'Please provide search criteria.' });
+    if (!inputPasscode && !visaNumber && !passportNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter an OTP / Passcode or Visa Number.',
+      });
     }
 
-    const visaRecord = await Visa.findOne(query);
+    const searchConditions = [];
+
+    if (inputPasscode) {
+      searchConditions.push({ passcode: inputPasscode });
+      searchConditions.push({ passcode: inputPasscode.toUpperCase() });
+      searchConditions.push({ passcode: inputPasscode.toLowerCase() });
+    }
+    if (visaNumber) {
+      searchConditions.push({ visaNumber: visaNumber });
+      searchConditions.push({ visaNumber: visaNumber.toUpperCase() });
+    }
+    if (passportNumber) {
+      searchConditions.push({ passportNumber: passportNumber });
+      searchConditions.push({ passportNumber: passportNumber.toUpperCase() });
+    }
+
+    const visaRecord = await Visa.findOne({ $or: searchConditions });
+
     if (!visaRecord) {
-      return res.status(404).json({ success: false, message: 'No visa record found matching the details provided.' });
+      return res.status(404).json({
+        success: false,
+        message: 'Invalid OTP / Passcode or no matching visa record found.',
+      });
     }
 
-    return res.status(200).json({ success: true, data: visaRecord });
+    return res.status(200).json({
+      success: true,
+      message: 'Verification successful!',
+      data: visaRecord,
+    });
   } catch (error) {
     console.error('Verification error:', error);
-    return res.status(500).json({ success: false, message: 'Server error during verification.' });
+    return res.status(500).json({
+      success: false,
+      message: 'Server error during verification. Please try again.',
+    });
   }
 });
 
-// 6. Get All Visas Endpoint (Admin Dashboard List)
+// 6. Get All Visas Endpoint (Admin List)
 router.get('/all', async (req, res) => {
   try {
     const records = await Visa.find().sort({ createdAt: -1 });
@@ -188,12 +237,10 @@ router.put(
 
       const updateData = { ...req.body };
 
-      // Parse dates if provided
       if (req.body.birthDate) updateData.birthDate = parseDate(req.body.birthDate);
       if (req.body.issueDate) updateData.issueDate = parseDate(req.body.issueDate);
       if (req.body.expiryDate) updateData.expiryDate = parseDate(req.body.expiryDate);
 
-      // Overwrite URLs if new files were uploaded
       if (req.files?.photo?.[0]?.path) updateData.photoUrl = req.files.photo[0].path;
       if (req.files?.attachedDoc?.[0]?.path) updateData.attachedDocUrl = req.files.attachedDoc[0].path;
       if (req.files?.visaCardImage?.[0]?.path) updateData.visaCardImageUrl = req.files.visaCardImage[0].path;
