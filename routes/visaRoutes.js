@@ -32,17 +32,36 @@ const parseDate = (dateStr) => {
   return isNaN(parsed.getTime()) ? undefined : parsed;
 };
 
-// 3. Admin Login Endpoint (Supports email, username, and fallback defaults)
+// 3. Admin Login Endpoint (Robust Debugging & Multi-Identifier Fallbacks)
 router.post('/admin/login', (req, res) => {
-  const loginIdentifier = (req.body.email || req.body.username || '').toString().trim().toLowerCase();
+  // Debug log incoming body on backend server (Render/Railway logs)
+  console.log('[Admin Login Request Payload]:', req.body);
+
+  const loginIdentifier = (req.body.email || req.body.username || req.body.identifier || '')
+    .toString()
+    .trim()
+    .toLowerCase();
+
   const password = (req.body.password || '').toString().trim();
 
-  // Allowed credentials from environment or defaults
-  const adminEmail = (process.env.ADMIN_EMAIL || 'admin@gmail.com').toLowerCase();
-  const adminUser = (process.env.ADMIN_USERNAME || 'admin').toLowerCase();
-  const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
+  if (!loginIdentifier || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please provide both username/email and password.',
+    });
+  }
 
-  if ((loginIdentifier === adminEmail || loginIdentifier === adminUser) && password === adminPass) {
+  // Permitted admin identifiers (environment variables + fallbacks)
+  const allowedIdentifiers = [
+    'admin',
+    'admin@gmail.com',
+    (process.env.ADMIN_USERNAME || '').toLowerCase(),
+    (process.env.ADMIN_EMAIL || '').toLowerCase(),
+  ].filter(Boolean);
+
+  const expectedPassword = process.env.ADMIN_PASSWORD || 'admin123';
+
+  if (allowedIdentifiers.includes(loginIdentifier) && password === expectedPassword) {
     return res.status(200).json({
       success: true,
       message: 'Authenticated successfully',
@@ -89,7 +108,11 @@ router.post(
 
       const cleanPasscode = passcode.toString().trim();
 
-      const existing = await Visa.findOne({ passcode: cleanPasscode });
+      // Check duplicate passcode using case-insensitive query
+      const existing = await Visa.findOne({
+        passcode: { $regex: `^${cleanPasscode}$`, $options: 'i' },
+      });
+
       if (existing) {
         return res.status(400).json({
           success: false,
@@ -97,20 +120,20 @@ router.post(
         });
       }
 
-      // Extract full Cloudinary HTTPS URLs safely
+      // Extract Cloudinary HTTPS URLs
       const photoUrl = req.files?.photo?.[0]?.path || '';
       const attachedDocUrl = req.files?.attachedDoc?.[0]?.path || '';
       const visaCardImageUrl = req.files?.visaCardImage?.[0]?.path || '';
 
       const newVisa = new Visa({
-        fullName: fullName.trim(),
-        nationality: nationality ? nationality.trim() : 'ETHIOPIA',
+        fullName: fullName.toString().trim(),
+        nationality: nationality ? nationality.toString().trim() : 'ETHIOPIA',
         passcode: cleanPasscode,
         visaNumber: visaNumber.toString().trim(),
         passportNumber: passportNumber.toString().trim(),
-        visaType,
-        occupation,
-        gender,
+        visaType: visaType ? visaType.toString().trim() : '',
+        occupation: occupation ? occupation.toString().trim() : '',
+        gender: gender ? gender.toString().trim() : '',
         birthDate: parseDate(birthDate),
         issueDate: parseDate(issueDate),
         expiryDate: parseDate(expiryDate),
@@ -145,10 +168,11 @@ router.post(
   }
 );
 
-// 5. Public Verification / OTP Search Endpoint
+// 5. Public Verification / OTP Search Endpoint (Case-Insensitive Exact Match)
 router.post('/verify', async (req, res) => {
   try {
-    // Check all possible field names sent from various frontend components
+    console.log('[Verification Request Payload]:', req.body);
+
     const inputPasscode = (
       req.body.passcode ||
       req.body.otp ||
@@ -172,17 +196,13 @@ router.post('/verify', async (req, res) => {
     const searchConditions = [];
 
     if (inputPasscode) {
-      searchConditions.push({ passcode: inputPasscode });
-      searchConditions.push({ passcode: inputPasscode.toUpperCase() });
-      searchConditions.push({ passcode: inputPasscode.toLowerCase() });
+      searchConditions.push({ passcode: { $regex: `^${inputPasscode}$`, $options: 'i' } });
     }
     if (visaNumber) {
-      searchConditions.push({ visaNumber: visaNumber });
-      searchConditions.push({ visaNumber: visaNumber.toUpperCase() });
+      searchConditions.push({ visaNumber: { $regex: `^${visaNumber}$`, $options: 'i' } });
     }
     if (passportNumber) {
-      searchConditions.push({ passportNumber: passportNumber });
-      searchConditions.push({ passportNumber: passportNumber.toUpperCase() });
+      searchConditions.push({ passportNumber: { $regex: `^${passportNumber}$`, $options: 'i' } });
     }
 
     const visaRecord = await Visa.findOne({ $or: searchConditions });

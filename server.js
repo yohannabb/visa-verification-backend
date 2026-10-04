@@ -31,7 +31,7 @@ cloudinary.config({
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'visa_verification_docs', // Matches route folder naming
+    folder: 'visa_verification_docs',
     allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf'],
   },
 });
@@ -40,27 +40,23 @@ const upload = multer({ storage });
 
 const app = express();
 
-// Middleware: Enable CORS for cross-origin requests (Netlify <-> Backend)
+// FIXED: Removed credentials: true when origin is '*' so CORS preflight requests succeed
 app.use(cors({
-  origin: '*', // Allows requests from Netlify and local environments
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Handle preflight OPTIONS requests for all routes
-app.options('*', cors());
-
+// Enable body parsing BEFORE routes (CRITICAL for req.body)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Local fallback uploads directory (for local file compatibility)
+// Local fallback uploads directory
 const uploadsPath = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsPath)) {
   fs.mkdirSync(uploadsPath, { recursive: true });
 }
 
-// Serve local static uploads with explicit CORS and Resource-Policy headers
 app.use('/uploads', express.static(uploadsPath, {
   setHeaders: (res) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -68,19 +64,18 @@ app.use('/uploads', express.static(uploadsPath, {
   }
 }));
 
-// Export upload middleware globally if required by external routes
 app.set('upload', upload);
 
 // Mount API Routes
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/visa', require('./routes/visaRoutes'));
 
-// Global Healthcheck Route
+// Healthcheck Route
 app.get('/', (req, res) => {
   res.send('Visa Verification API with Cloudinary is running successfully...');
 });
 
-// Handle 404 for unknown routes
+// 404 Handler
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'API route not found' });
 });
