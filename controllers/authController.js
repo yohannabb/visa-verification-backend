@@ -1,7 +1,6 @@
 // controllers/authController.js
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 
 // Helper function to generate JWT Token
 const generateToken = (id) => {
@@ -10,12 +9,12 @@ const generateToken = (id) => {
   });
 };
 
-// @desc    Seed or reset default admin account
+// @desc    Seed or reset default admin account in MongoDB Atlas
 // @route   GET /api/auth/seed-admin
-// @access  Public (One-time setup utility)
+// @access  Public
 exports.seedAdmin = async (req, res) => {
   try {
-    const adminEmail = (process.env.ADMIN_EMAIL || 'admin@mols.gov').toLowerCase().trim();
+    const adminEmail = (process.env.ADMIN_EMAIL || 'admin@gmail.com').toLowerCase().trim();
     const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
     const adminName = 'System Administrator';
 
@@ -23,12 +22,9 @@ exports.seedAdmin = async (req, res) => {
       $or: [{ email: adminEmail }, { username: 'admin' }] 
     }).select('+password');
 
-    // Hash the password securely
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(adminPassword, salt);
-
     if (user) {
-      user.password = hashedPassword;
+      // Direct assignment triggers the pre('save') hook in User.js to hash properly once
+      user.password = adminPassword;
       user.role = 'admin';
       user.email = adminEmail;
       user.username = 'admin';
@@ -36,22 +32,22 @@ exports.seedAdmin = async (req, res) => {
 
       return res.status(200).json({
         success: true,
-        message: `Admin user existing record updated. You can now login with: ${adminEmail}`,
+        message: `Admin password updated/reset successfully. Login with email: ${adminEmail} or username: admin`,
       });
     }
 
-    // Create new admin user if none exists
+    // Creating new user automatically triggers pre('save') hook in User.js
     user = await User.create({
       fullName: adminName,
       email: adminEmail,
       username: 'admin',
-      password: hashedPassword,
+      password: adminPassword,
       role: 'admin',
     });
 
     res.status(201).json({
       success: true,
-      message: `Default admin created successfully! Email: ${adminEmail}`,
+      message: `Default admin created successfully. Login with email: ${adminEmail} or username: admin`,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -60,12 +56,11 @@ exports.seedAdmin = async (req, res) => {
 
 // @desc    Register a new user
 // @route   POST /api/auth/register
-// @access  Protected (Admin only) or Public
+// @access  Protected / Admin Only
 exports.registerUser = async (req, res) => {
   try {
     const { fullName, email, username, password, role } = req.body;
 
-    // Must provide either email OR username alongside password & name
     if (!fullName || (!email && !username) || !password) {
       return res.status(400).json({
         success: false,
@@ -73,7 +68,6 @@ exports.registerUser = async (req, res) => {
       });
     }
 
-    // Build query to check if user already exists
     const query = [];
     if (email) query.push({ email: email.toLowerCase().trim() });
     if (username) query.push({ username: username.toLowerCase().trim() });
@@ -86,16 +80,12 @@ exports.registerUser = async (req, res) => {
       });
     }
 
-    // Hash password before saving if model doesn't handle pre-save hashing
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Create user
+    // Pass plain password; User.js pre('save') hook handles single-pass hashing
     const user = await User.create({
       fullName,
       email: email ? email.toLowerCase().trim() : undefined,
       username: username ? username.toLowerCase().trim() : undefined,
-      password: hashedPassword,
+      password,
       role: role || 'user',
     });
 
@@ -122,7 +112,6 @@ exports.registerUser = async (req, res) => {
 // @access  Public
 exports.loginUser = async (req, res) => {
   try {
-    // Read username, email, or single identifier field from request body
     const rawIdentifier = req.body.username || req.body.email || req.body.identifier;
     const { password } = req.body;
 
@@ -133,28 +122,24 @@ exports.loginUser = async (req, res) => {
       });
     }
 
-    const identifier = rawIdentifier.toLowerCase().trim();
+    const identifier = rawIdentifier.toString().toLowerCase().trim();
 
-    // Check for user matching username OR email (explicitly selecting password)
+    // Query user by username or email and include hidden password field
     const user = await User.findOne({
       $or: [{ username: identifier }, { email: identifier }],
     }).select('+password');
 
     if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid admin username or password' });
+      return res.status(401).json({ success: false, message: 'Invalid admin username/email or password.' });
     }
 
-    // Verify password via user.matchPassword method or fallback to direct bcrypt comparison
-    let isMatch = false;
-    if (typeof user.matchPassword === 'function') {
-      isMatch = await user.matchPassword(password);
-    } else {
-      isMatch = await bcrypt.compare(password, user.password);
-    }
+    // Use User.js schema matchPassword method
+    const isMatch = await user.matchPassword(password.toString().trim());
 
     if (isMatch) {
-      res.json({
+      res.status(200).json({
         success: true,
+        token: generateToken(user._id),
         data: {
           _id: user._id,
           fullName: user.fullName,
@@ -165,7 +150,7 @@ exports.loginUser = async (req, res) => {
         },
       });
     } else {
-      res.status(401).json({ success: false, message: 'Invalid admin username or password' });
+      res.status(401).json({ success: false, message: 'Invalid admin username/email or password.' });
     }
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
