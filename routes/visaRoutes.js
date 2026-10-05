@@ -7,34 +7,30 @@ const Visa = require('../models/Visa');
 
 const router = express.Router();
 
-// 1. Configure Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// 2. Set up Cloudinary Storage for Multer
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'visa_verification_docs', // Folder name inside Cloudinary
+    folder: 'visa_verification_docs',
     allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf'],
   },
 });
 
 const upload = multer({ storage });
 
-// Helper to safely parse dates without saving "Invalid Date"
 const parseDate = (dateStr) => {
   if (!dateStr) return undefined;
   const parsed = new Date(dateStr);
   return isNaN(parsed.getTime()) ? undefined : parsed;
 };
 
-// 3. Admin Login Endpoint (Robust Debugging & Multi-Identifier Fallbacks)
+// 1. Admin Login Endpoint (Unified payload structure)
 router.post('/admin/login', (req, res) => {
-  // Debug log incoming body on backend server (Render/Railway logs)
   console.log('[Admin Login Request Payload]:', req.body);
 
   const loginIdentifier = (req.body.email || req.body.username || req.body.identifier || '')
@@ -51,10 +47,10 @@ router.post('/admin/login', (req, res) => {
     });
   }
 
-  // Permitted admin identifiers (environment variables + fallbacks)
   const allowedIdentifiers = [
     'admin',
     'admin@gmail.com',
+    'admin@mols.gov',
     (process.env.ADMIN_USERNAME || '').toLowerCase(),
     (process.env.ADMIN_EMAIL || '').toLowerCase(),
   ].filter(Boolean);
@@ -62,10 +58,18 @@ router.post('/admin/login', (req, res) => {
   const expectedPassword = process.env.ADMIN_PASSWORD || 'admin123';
 
   if (allowedIdentifiers.includes(loginIdentifier) && password === expectedPassword) {
+    const adminData = {
+      token: 'admin-auth-token-valid',
+      role: 'admin',
+      email: loginIdentifier,
+      username: 'admin',
+    };
+
     return res.status(200).json({
       success: true,
       message: 'Authenticated successfully',
       token: 'admin-auth-token-valid',
+      data: adminData,
     });
   }
 
@@ -75,7 +79,7 @@ router.post('/admin/login', (req, res) => {
   });
 });
 
-// 4. Register New Visa Record Endpoint
+// 2. Register New Visa Record
 router.post(
   '/register',
   upload.fields([
@@ -108,7 +112,6 @@ router.post(
 
       const cleanPasscode = passcode.toString().trim();
 
-      // Check duplicate passcode using case-insensitive query
       const existing = await Visa.findOne({
         passcode: { $regex: `^${cleanPasscode}$`, $options: 'i' },
       });
@@ -120,7 +123,6 @@ router.post(
         });
       }
 
-      // Extract Cloudinary HTTPS URLs
       const photoUrl = req.files?.photo?.[0]?.path || '';
       const attachedDocUrl = req.files?.attachedDoc?.[0]?.path || '';
       const visaCardImageUrl = req.files?.visaCardImage?.[0]?.path || '';
@@ -168,23 +170,27 @@ router.post(
   }
 );
 
-// 5. Public Verification / OTP Search Endpoint (Case-Insensitive Exact Match)
-router.post('/verify', async (req, res) => {
+// 3. Robust Public Verification / OTP Search (Supports GET & POST, Body & Query)
+const handleVerification = async (req, res) => {
   try {
-    console.log('[Verification Request Payload]:', req.body);
+    const payload = { ...req.query, ...req.body };
+    console.log('[Verification Payload Received]:', payload);
 
     const inputPasscode = (
-      req.body.passcode ||
-      req.body.otp ||
-      req.body.code ||
-      req.body.accessCode ||
+      payload.passcode ||
+      payload.passCode ||
+      payload.otp ||
+      payload.OTP ||
+      payload.code ||
+      payload.accessCode ||
+      payload.access_code ||
       ''
     )
       .toString()
       .trim();
 
-    const visaNumber = (req.body.visaNumber || '').toString().trim();
-    const passportNumber = (req.body.passportNumber || '').toString().trim();
+    const visaNumber = (payload.visaNumber || payload.visanumber || '').toString().trim();
+    const passportNumber = (payload.passportNumber || payload.passportnumber || '').toString().trim();
 
     if (!inputPasscode && !visaNumber && !passportNumber) {
       return res.status(400).json({
@@ -226,9 +232,12 @@ router.post('/verify', async (req, res) => {
       message: 'Server error during verification. Please try again.',
     });
   }
-});
+};
 
-// 6. Get All Visas Endpoint (Admin List)
+router.post('/verify', handleVerification);
+router.get('/verify', handleVerification);
+
+// 4. Get All Visas Endpoint
 router.get('/all', async (req, res) => {
   try {
     const records = await Visa.find().sort({ createdAt: -1 });
@@ -238,7 +247,7 @@ router.get('/all', async (req, res) => {
   }
 });
 
-// 7. Update Existing Visa Record
+// 5. Update Visa Record
 router.put(
   '/:id',
   upload.fields([
@@ -278,7 +287,7 @@ router.put(
   }
 );
 
-// 8. Delete Visa Record Endpoint
+// 6. Delete Visa Record
 router.delete('/:id', async (req, res) => {
   try {
     const deleted = await Visa.findByIdAndDelete(req.params.id);
