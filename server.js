@@ -40,12 +40,33 @@ const upload = multer({ storage });
 
 const app = express();
 
-// FIXED: Removed credentials: true when origin is '*' so CORS preflight requests succeed
+// Allowed Origins List
+const allowedOrigins = [
+  'https://mols-doc-checker.netlify.app',
+  'http://localhost:5173',
+  'http://localhost:3000'
+];
+
+if (process.env.CLIENT_URL) {
+  allowedOrigins.push(process.env.CLIENT_URL.trim());
+}
+
+// CORS Configuration
 app.use(cors({
-  origin: '*',
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, or server-to-server)
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, true); // Fallback allow to avoid CORS issues
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
+
+// Handle preflight options requests globally
+app.options('*', cors());
 
 // Enable body parsing BEFORE routes (CRITICAL for req.body)
 app.use(express.json());
