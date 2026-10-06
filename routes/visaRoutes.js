@@ -83,9 +83,14 @@ router.post('/admin/login', (req, res) => {
 router.post(
   '/register',
   upload.fields([
+    // Legacy / Alternative form keys
     { name: 'photo', maxCount: 1 },
     { name: 'attachedDoc', maxCount: 1 },
     { name: 'visaCardImage', maxCount: 1 },
+    // Frontend form keys
+    { name: 'applicantPhoto', maxCount: 1 },
+    { name: 'attachedDocument', maxCount: 1 },
+    { name: 'bottomVisaGraphic', maxCount: 1 },
   ]),
   async (req, res) => {
     try {
@@ -93,6 +98,7 @@ router.post(
         fullName,
         nationality,
         passcode,
+        otp, // Added OTP fallback
         visaNumber,
         passportNumber,
         visaType,
@@ -103,14 +109,17 @@ router.post(
         expiryDate,
       } = req.body;
 
-      if (!passcode || !fullName || !passportNumber || !visaNumber) {
+      // Support either passcode or otp
+      const rawPasscode = passcode || otp;
+
+      if (!rawPasscode || !fullName || !passportNumber || !visaNumber) {
         return res.status(400).json({
           success: false,
           message: 'Required fields are missing (Passcode/OTP, Full Name, Passport, or Visa Number).',
         });
       }
 
-      const cleanPasscode = passcode.toString().trim();
+      const cleanPasscode = rawPasscode.toString().trim();
 
       const existing = await Visa.findOne({
         passcode: { $regex: `^${cleanPasscode}$`, $options: 'i' },
@@ -123,9 +132,21 @@ router.post(
         });
       }
 
-      const photoUrl = req.files?.photo?.[0]?.path || '';
-      const attachedDocUrl = req.files?.attachedDoc?.[0]?.path || '';
-      const visaCardImageUrl = req.files?.visaCardImage?.[0]?.path || '';
+      // Read URLs dynamically regardless of which key name was sent
+      const photoUrl =
+        req.files?.applicantPhoto?.[0]?.path ||
+        req.files?.photo?.[0]?.path ||
+        '';
+
+      const attachedDocUrl =
+        req.files?.attachedDocument?.[0]?.path ||
+        req.files?.attachedDoc?.[0]?.path ||
+        '';
+
+      const visaCardImageUrl =
+        req.files?.bottomVisaGraphic?.[0]?.path ||
+        req.files?.visaCardImage?.[0]?.path ||
+        '';
 
       const newVisa = new Visa({
         fullName: fullName.toString().trim(),
@@ -170,7 +191,7 @@ router.post(
   }
 );
 
-// 3. Robust Public Verification / OTP Search (Supports GET & POST, Body & Query)
+// 3. Public Verification / OTP Search
 const handleVerification = async (req, res) => {
   try {
     const payload = { ...req.query, ...req.body };
@@ -254,6 +275,9 @@ router.put(
     { name: 'photo', maxCount: 1 },
     { name: 'attachedDoc', maxCount: 1 },
     { name: 'visaCardImage', maxCount: 1 },
+    { name: 'applicantPhoto', maxCount: 1 },
+    { name: 'attachedDocument', maxCount: 1 },
+    { name: 'bottomVisaGraphic', maxCount: 1 },
   ]),
   async (req, res) => {
     try {
@@ -270,9 +294,13 @@ router.put(
       if (req.body.issueDate) updateData.issueDate = parseDate(req.body.issueDate);
       if (req.body.expiryDate) updateData.expiryDate = parseDate(req.body.expiryDate);
 
-      if (req.files?.photo?.[0]?.path) updateData.photoUrl = req.files.photo[0].path;
-      if (req.files?.attachedDoc?.[0]?.path) updateData.attachedDocUrl = req.files.attachedDoc[0].path;
-      if (req.files?.visaCardImage?.[0]?.path) updateData.visaCardImageUrl = req.files.visaCardImage[0].path;
+      const photoPath = req.files?.applicantPhoto?.[0]?.path || req.files?.photo?.[0]?.path;
+      const attachedDocPath = req.files?.attachedDocument?.[0]?.path || req.files?.attachedDoc?.[0]?.path;
+      const visaCardImagePath = req.files?.bottomVisaGraphic?.[0]?.path || req.files?.visaCardImage?.[0]?.path;
+
+      if (photoPath) updateData.photoUrl = photoPath;
+      if (attachedDocPath) updateData.attachedDocUrl = attachedDocPath;
+      if (visaCardImagePath) updateData.visaCardImageUrl = visaCardImagePath;
 
       const updatedVisa = await Visa.findByIdAndUpdate(id, updateData, { new: true });
 
