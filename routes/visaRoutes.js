@@ -3,7 +3,6 @@ const express = require('express');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const path = require('path');
 const Visa = require('../models/Visa');
 
 const router = express.Router();
@@ -31,7 +30,7 @@ if (hasCloudinaryKeys) {
     },
   });
 } else {
-  console.warn('⚠️ Cloudinary keys missing! Falling back to local disk storage in /uploads');
+  console.warn('⚠️ Cloudinary keys missing in environment variables! Using disk storage fallback.');
   storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
     filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`)
@@ -40,10 +39,10 @@ if (hasCloudinaryKeys) {
 
 const upload = multer({ 
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB Limit
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
 
-// Middleware wrapper to intercept Multer / Cloudinary upload errors gracefully
+// Middleware to handle Multer upload errors cleanly
 const handleUpload = (req, res, next) => {
   const uploadFields = upload.fields([
     { name: 'photo', maxCount: 1 },
@@ -56,20 +55,27 @@ const handleUpload = (req, res, next) => {
 
   uploadFields(req, res, (err) => {
     if (err) {
-      console.error('[Multer/Cloudinary Error]:', err);
+      console.error('❌ [Multer Upload Error]:', err);
       return res.status(400).json({
         success: false,
-        message: `Image upload failed: ${err.message || 'Error processing files.'}`
+        message: `File upload failed: ${err.message || 'Error processing uploaded files.'}`
       });
     }
     next();
   });
 };
 
+// Safe date parser to avoid CastError in Mongoose
 const parseDate = (dateStr) => {
-  if (!dateStr) return undefined;
+  if (!dateStr || dateStr === 'null' || dateStr === 'undefined') return undefined;
   const parsed = new Date(dateStr);
   return isNaN(parsed.getTime()) ? undefined : parsed;
+};
+
+// Helper function to safely extract file path or URL
+const getFilePath = (file) => {
+  if (!file) return '';
+  return file.path || file.secure_url || (file.filename ? `/uploads/${file.filename}` : '');
 };
 
 // 1. Admin Login Endpoint
@@ -122,14 +128,12 @@ router.post('/admin/login', (req, res) => {
   });
 });
 
-// Helper function to extract file URL/Path
-const getFilePath = (file) => {
-  if (!file) return '';
-  return file.path || file.secure_url || `/uploads/${file.filename}`;
-};
-
 // 2. Register New Visa Record
 router.post('/register', handleUpload, async (req, res) => {
+  console.log('--- NEW VISA REGISTRATION REQUEST ---');
+  console.log('[Payload Body]:', req.body);
+  console.log('[Uploaded Files]:', req.files ? Object.keys(req.files) : 'No files');
+
   try {
     const {
       fullName,
@@ -146,17 +150,19 @@ router.post('/register', handleUpload, async (req, res) => {
       expiryDate,
     } = req.body;
 
+    // Accept passcode or otp
     const rawPasscode = passcode || otp;
 
     if (!rawPasscode || !fullName || !passportNumber || !visaNumber) {
       return res.status(400).json({
         success: false,
-        message: 'Required fields are missing (Passcode/OTP, Full Name, Passport, or Visa Number).',
+        message: 'Missing required fields: Passcode/OTP, Full Name, Passport, or Visa Number.',
       });
     }
 
     const cleanPasscode = rawPasscode.toString().trim();
 
+    // Check for existing passcode
     const existing = await Visa.findOne({
       passcode: { $regex: `^${cleanPasscode}$`, $options: 'i' },
     });
@@ -164,14 +170,16 @@ router.post('/register', handleUpload, async (req, res) => {
     if (existing) {
       return res.status(400).json({
         success: false,
-        message: 'Access Code / OTP (Passcode) already exists.',
+        message: 'Access Code / OTP (Passcode) already exists in the database.',
       });
     }
 
+    // Process file paths
     const photoUrl = getFilePath(req.files?.applicantPhoto?.[0] || req.files?.photo?.[0]);
     const attachedDocUrl = getFilePath(req.files?.attachedDocument?.[0] || req.files?.attachedDoc?.[0]);
     const visaCardImageUrl = getFilePath(req.files?.bottomVisaGraphic?.[0] || req.files?.visaCardImage?.[0]);
 
+    // Construct Mongoose Object
     const newVisa = new Visa({
       fullName: fullName.toString().trim(),
       nationality: nationality ? nationality.toString().trim() : 'ETHIOPIA',
@@ -189,27 +197,39 @@ router.post('/register', handleUpload, async (req, res) => {
       visaCardImageUrl,
     });
 
-    await newVisa.save();
+    const savedRecord = await newVisa.save();
+
+    console.log('✅ Visa Record Saved Successfully:', savedRecord._id);
 
     return res.status(201).json({
       success: true,
       message: 'Visa Record Registered Successfully!',
-      data: newVisa,
+      data: savedRecord,
     });
   } catch (error) {
-    console.error('Registration database error:', error);
+    console.error('❌ [Database Save Error]:', error);
 
+    // Mongoose duplicate key error (code 11000)
     if (error.code === 11000) {
       const duplicateField = Object.keys(error.keyPattern || {})[0] || 'field';
       return res.status(400).json({
         success: false,
-        message: `A record with this ${duplicateField} already exists.`,
+        message: `A visa record with this ${duplicateField} already exists.`,
+      });
+    }
+
+    // Mongoose schema validation error
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map((err) => err.message);
+      return res.status(400).json({
+        success: false,
+        message: `Validation Error: ${messages.join(', ')}`,
       });
     }
 
     return res.status(500).json({
       success: false,
-      message: error.message || 'Failed to register visa record.',
+      message: error.message || 'Internal Server Error while saving visa record.',
     });
   }
 });
