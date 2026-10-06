@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
@@ -48,34 +47,38 @@ const allowedOrigins = [
 ];
 
 if (process.env.CLIENT_URL) {
-  allowedOrigins.push(process.env.CLIENT_URL.trim());
+  const customOrigin = process.env.CLIENT_URL.trim();
+  if (customOrigin && !allowedOrigins.includes(customOrigin)) {
+    allowedOrigins.push(customOrigin);
+  }
 }
 
-// CORS Configuration
+// Strict CORS Configuration
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, or server-to-server)
-    if (!origin || allowedOrigins.includes(origin)) {
+    // Allow non-browser calls (like Postman, mobile apps, curl) or matched origins
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     }
-    return callback(null, true); // Fallback allow to avoid CORS issues
+    return callback(new Error('CORS policy violation: Access denied for this origin.'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
 
-// Handle preflight options requests globally
-app.options('*', cors());
-
-// Enable body parsing BEFORE routes (CRITICAL for req.body)
+// Enable body parsing BEFORE routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Local fallback uploads directory
+// Local fallback uploads directory with safety wrapper
 const uploadsPath = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsPath)) {
-  fs.mkdirSync(uploadsPath, { recursive: true });
+try {
+  if (!fs.existsSync(uploadsPath)) {
+    fs.mkdirSync(uploadsPath, { recursive: true });
+  }
+} catch (err) {
+  console.warn('ℹ️ Local uploads folder could not be initialized (using Cloudinary storage instead).');
 }
 
 app.use('/uploads', express.static(uploadsPath, {
@@ -93,12 +96,21 @@ app.use('/api/visa', require('./routes/visaRoutes'));
 
 // Healthcheck Route
 app.get('/', (req, res) => {
-  res.send('Visa Verification API with Cloudinary is running successfully...');
+  res.status(200).json({ success: true, message: 'Visa Verification API with Cloudinary is running successfully...' });
 });
 
 // 404 Handler
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'API route not found' });
+});
+
+// Global Error Handling Middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled Error:', err.message);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Internal Server Error'
+  });
 });
 
 const PORT = process.env.PORT || 5000;
