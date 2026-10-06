@@ -3,6 +3,7 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
 const fs = require('fs');
+const multer = require('multer'); // Added missing multer import
 const connectDB = require('./config/db');
 
 // Load environment variables
@@ -41,8 +42,8 @@ app.use(cors({
 }));
 
 // Enable body parsing BEFORE routes
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Local fallback uploads directory with safety wrapper
 const uploadsPath = path.join(__dirname, 'uploads');
@@ -75,12 +76,12 @@ app.use((req, res) => {
   res.status(404).json({ success: false, message: 'API route not found' });
 });
 
-// Global Error Handling Middleware (Returns the EXACT error message to frontend)
+// Global Error Handling Middleware
 app.use((err, req, res, next) => {
-  console.error('Unhandled Error:', err);
-  
-  // Handle Multer/Cloudinary specific errors
-  if (err instanceof multer.MulterError || err.name === 'MulterError') {
+  console.error('Unhandled Global Error:', err);
+
+  // Handle Multer specific errors safely without crashing
+  if ((multer && err instanceof multer.MulterError) || err.name === 'MulterError') {
     return res.status(400).json({
       success: false,
       message: `File upload error: ${err.message}`

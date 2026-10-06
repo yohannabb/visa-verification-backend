@@ -30,9 +30,9 @@ if (hasCloudinaryKeys) {
     },
   });
 } else {
-  console.warn('⚠️ Cloudinary keys missing in environment variables! Using disk storage fallback.');
+  console.warn('⚠️ Cloudinary keys missing in environment variables! Using fallback disk storage.');
   storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, '/tmp'), // Safe temporary write path on Render
+    destination: (req, file, cb) => cb(null, '/tmp'), // Writeable directory on Render
     filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`)
   });
 }
@@ -42,9 +42,8 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
 
-// Middleware to handle Multer upload errors cleanly using upload.any()
+// Middleware using upload.any() to accept any file field name sent from FormData
 const handleUpload = (req, res, next) => {
-  // upload.any() accepts any file field key from FormData to prevent Unexpected File Field errors
   upload.any()(req, res, (err) => {
     if (err) {
       console.error('❌ [Multer Upload Error]:', err);
@@ -64,14 +63,13 @@ const parseDate = (dateStr) => {
   return isNaN(parsed.getTime()) ? undefined : parsed;
 };
 
-// Helper function to dynamically match uploaded files from req.files array
-const getFilePathByKeys = (files, ...possibleFieldNames) => {
+// Extract uploaded file paths dynamically
+const extractFilePath = (files, ...fieldKeys) => {
   if (!files || !Array.isArray(files) || files.length === 0) return '';
-  
-  for (const name of possibleFieldNames) {
-    const matchedFile = files.find((f) => f.fieldname === name);
-    if (matchedFile) {
-      return matchedFile.path || matchedFile.secure_url || (matchedFile.filename ? `/uploads/${matchedFile.filename}` : '');
+  for (const key of fieldKeys) {
+    const file = files.find((f) => f.fieldname === key);
+    if (file) {
+      return file.path || file.secure_url || (file.filename ? `/uploads/${file.filename}` : '');
     }
   }
   return '';
@@ -79,8 +77,6 @@ const getFilePathByKeys = (files, ...possibleFieldNames) => {
 
 // 1. Admin Login Endpoint
 router.post('/admin/login', (req, res) => {
-  console.log('[Admin Login Request Payload]:', req.body);
-
   const loginIdentifier = (req.body.email || req.body.username || req.body.identifier || '')
     .toString()
     .trim()
@@ -106,18 +102,16 @@ router.post('/admin/login', (req, res) => {
   const expectedPassword = process.env.ADMIN_PASSWORD || 'admin123';
 
   if (allowedIdentifiers.includes(loginIdentifier) && password === expectedPassword) {
-    const adminData = {
-      token: 'admin-auth-token-valid',
-      role: 'admin',
-      email: loginIdentifier,
-      username: 'admin',
-    };
-
     return res.status(200).json({
       success: true,
       message: 'Authenticated successfully',
       token: 'admin-auth-token-valid',
-      data: adminData,
+      data: {
+        token: 'admin-auth-token-valid',
+        role: 'admin',
+        email: loginIdentifier,
+        username: 'admin',
+      },
     });
   }
 
@@ -130,8 +124,8 @@ router.post('/admin/login', (req, res) => {
 // 2. Register New Visa Record
 router.post('/register', handleUpload, async (req, res) => {
   console.log('--- NEW VISA REGISTRATION REQUEST ---');
-  console.log('[Payload Body]:', req.body);
-  console.log('[Uploaded Files Count]:', req.files ? req.files.length : 0);
+  console.log('Payload Body:', req.body);
+  console.log('Files Received:', req.files ? req.files.map(f => f.fieldname) : 'None');
 
   try {
     const {
@@ -160,7 +154,6 @@ router.post('/register', handleUpload, async (req, res) => {
 
     const cleanPasscode = rawPasscode.toString().trim();
 
-    // Check for existing passcode
     const existing = await Visa.findOne({
       passcode: { $regex: `^${cleanPasscode}$`, $options: 'i' },
     });
@@ -168,24 +161,23 @@ router.post('/register', handleUpload, async (req, res) => {
     if (existing) {
       return res.status(400).json({
         success: false,
-        message: 'Access Code / OTP (Passcode) already exists in the database.',
+        message: 'Access Code / OTP (Passcode) already exists in database.',
       });
     }
 
-    // Extract file paths using field name matching or array index fallback
+    // Process file uploads smoothly
     const photoUrl =
-      getFilePathByKeys(req.files, 'applicantPhoto', 'photo', 'profileImage', 'image', 'avatar') ||
+      extractFilePath(req.files, 'applicantPhoto', 'photo', 'profileImage', 'image', 'avatar') ||
       (req.files?.[0] ? (req.files[0].path || req.files[0].secure_url) : '');
 
     const attachedDocUrl =
-      getFilePathByKeys(req.files, 'attachedDocument', 'attachedDoc', 'document', 'pdf', 'file') ||
+      extractFilePath(req.files, 'attachedDocument', 'attachedDoc', 'document', 'pdf', 'file') ||
       (req.files?.[1] ? (req.files[1].path || req.files[1].secure_url) : '');
 
     const visaCardImageUrl =
-      getFilePathByKeys(req.files, 'bottomVisaGraphic', 'visaCardImage', 'visaGraphic', 'cardImage') ||
+      extractFilePath(req.files, 'bottomVisaGraphic', 'visaCardImage', 'visaGraphic', 'cardImage') ||
       (req.files?.[2] ? (req.files[2].path || req.files[2].secure_url) : '');
 
-    // Construct Mongoose Document
     const newVisa = new Visa({
       fullName: fullName.toString().trim(),
       nationality: nationality ? nationality.toString().trim() : 'ETHIOPIA',
@@ -205,7 +197,7 @@ router.post('/register', handleUpload, async (req, res) => {
 
     const savedRecord = await newVisa.save();
 
-    console.log('✅ Visa Record Saved Successfully:', savedRecord._id);
+    console.log('✅ Visa Record Saved Successfully. ID:', savedRecord._id);
 
     return res.status(201).json({
       success: true,
@@ -213,23 +205,19 @@ router.post('/register', handleUpload, async (req, res) => {
       data: savedRecord,
     });
   } catch (error) {
-    console.error('❌ [Database Save Error]:', error);
+    console.error('❌ Database Save Error:', error);
 
-    // Mongoose duplicate key error
     if (error.code === 11000) {
-      const duplicateField = Object.keys(error.keyPattern || {})[0] || 'field';
       return res.status(400).json({
         success: false,
-        message: `A visa record with this ${duplicateField} already exists.`,
+        message: 'A visa record with this passcode/field already exists.',
       });
     }
 
-    // Mongoose schema validation error
     if (error.name === 'ValidationError') {
-      const messages = Object.values(error.errors).map((err) => err.message);
       return res.status(400).json({
         success: false,
-        message: `Validation Error: ${messages.join(', ')}`,
+        message: `Validation Error: ${Object.values(error.errors).map(e => e.message).join(', ')}`,
       });
     }
 
@@ -246,17 +234,8 @@ const handleVerification = async (req, res) => {
     const payload = { ...req.query, ...req.body };
 
     const inputPasscode = (
-      payload.passcode ||
-      payload.passCode ||
-      payload.otp ||
-      payload.OTP ||
-      payload.code ||
-      payload.accessCode ||
-      payload.access_code ||
-      ''
-    )
-      .toString()
-      .trim();
+      payload.passcode || payload.passCode || payload.otp || payload.OTP || payload.code || payload.accessCode || ''
+    ).toString().trim();
 
     const visaNumber = (payload.visaNumber || payload.visanumber || '').toString().trim();
     const passportNumber = (payload.passportNumber || payload.passportnumber || '').toString().trim();
@@ -269,16 +248,9 @@ const handleVerification = async (req, res) => {
     }
 
     const searchConditions = [];
-
-    if (inputPasscode) {
-      searchConditions.push({ passcode: { $regex: `^${inputPasscode}$`, $options: 'i' } });
-    }
-    if (visaNumber) {
-      searchConditions.push({ visaNumber: { $regex: `^${visaNumber}$`, $options: 'i' } });
-    }
-    if (passportNumber) {
-      searchConditions.push({ passportNumber: { $regex: `^${passportNumber}$`, $options: 'i' } });
-    }
+    if (inputPasscode) searchConditions.push({ passcode: { $regex: `^${inputPasscode}$`, $options: 'i' } });
+    if (visaNumber) searchConditions.push({ visaNumber: { $regex: `^${visaNumber}$`, $options: 'i' } });
+    if (passportNumber) searchConditions.push({ passportNumber: { $regex: `^${passportNumber}$`, $options: 'i' } });
 
     const visaRecord = await Visa.findOne({ $or: searchConditions });
 
@@ -295,7 +267,6 @@ const handleVerification = async (req, res) => {
       data: visaRecord,
     });
   } catch (error) {
-    console.error('Verification error:', error);
     return res.status(500).json({
       success: false,
       message: 'Server error during verification. Please try again.',
@@ -332,9 +303,9 @@ router.put('/:id', handleUpload, async (req, res) => {
     if (req.body.issueDate) updateData.issueDate = parseDate(req.body.issueDate);
     if (req.body.expiryDate) updateData.expiryDate = parseDate(req.body.expiryDate);
 
-    const photoPath = getFilePathByKeys(req.files, 'applicantPhoto', 'photo', 'profileImage', 'image', 'avatar');
-    const attachedDocPath = getFilePathByKeys(req.files, 'attachedDocument', 'attachedDoc', 'document', 'pdf', 'file');
-    const visaCardImagePath = getFilePathByKeys(req.files, 'bottomVisaGraphic', 'visaCardImage', 'visaGraphic', 'cardImage');
+    const photoPath = extractFilePath(req.files, 'applicantPhoto', 'photo', 'profileImage', 'image');
+    const attachedDocPath = extractFilePath(req.files, 'attachedDocument', 'attachedDoc', 'document', 'pdf', 'file');
+    const visaCardImagePath = extractFilePath(req.files, 'bottomVisaGraphic', 'visaCardImage', 'visaGraphic', 'cardImage');
 
     if (photoPath) updateData.photoUrl = photoPath;
     if (attachedDocPath) updateData.attachedDocUrl = attachedDocPath;
