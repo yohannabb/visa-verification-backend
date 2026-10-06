@@ -32,7 +32,7 @@ if (hasCloudinaryKeys) {
 } else {
   console.warn('⚠️ Cloudinary keys missing in environment variables! Using disk storage fallback.');
   storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, 'uploads/'),
+    destination: (req, file, cb) => cb(null, '/tmp'), // Safe temporary write path on Render
     filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`)
   });
 }
@@ -42,18 +42,10 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
 
-// Middleware to handle Multer upload errors cleanly
+// Middleware to handle Multer upload errors cleanly using upload.any()
 const handleUpload = (req, res, next) => {
-  const uploadFields = upload.fields([
-    { name: 'photo', maxCount: 1 },
-    { name: 'attachedDoc', maxCount: 1 },
-    { name: 'visaCardImage', maxCount: 1 },
-    { name: 'applicantPhoto', maxCount: 1 },
-    { name: 'attachedDocument', maxCount: 1 },
-    { name: 'bottomVisaGraphic', maxCount: 1 },
-  ]);
-
-  uploadFields(req, res, (err) => {
+  // upload.any() accepts any file field key from FormData to prevent Unexpected File Field errors
+  upload.any()(req, res, (err) => {
     if (err) {
       console.error('❌ [Multer Upload Error]:', err);
       return res.status(400).json({
@@ -72,10 +64,17 @@ const parseDate = (dateStr) => {
   return isNaN(parsed.getTime()) ? undefined : parsed;
 };
 
-// Helper function to safely extract file path or URL
-const getFilePath = (file) => {
-  if (!file) return '';
-  return file.path || file.secure_url || (file.filename ? `/uploads/${file.filename}` : '');
+// Helper function to dynamically match uploaded files from req.files array
+const getFilePathByKeys = (files, ...possibleFieldNames) => {
+  if (!files || !Array.isArray(files) || files.length === 0) return '';
+  
+  for (const name of possibleFieldNames) {
+    const matchedFile = files.find((f) => f.fieldname === name);
+    if (matchedFile) {
+      return matchedFile.path || matchedFile.secure_url || (matchedFile.filename ? `/uploads/${matchedFile.filename}` : '');
+    }
+  }
+  return '';
 };
 
 // 1. Admin Login Endpoint
@@ -132,7 +131,7 @@ router.post('/admin/login', (req, res) => {
 router.post('/register', handleUpload, async (req, res) => {
   console.log('--- NEW VISA REGISTRATION REQUEST ---');
   console.log('[Payload Body]:', req.body);
-  console.log('[Uploaded Files]:', req.files ? Object.keys(req.files) : 'No files');
+  console.log('[Uploaded Files Count]:', req.files ? req.files.length : 0);
 
   try {
     const {
@@ -150,7 +149,6 @@ router.post('/register', handleUpload, async (req, res) => {
       expiryDate,
     } = req.body;
 
-    // Accept passcode or otp
     const rawPasscode = passcode || otp;
 
     if (!rawPasscode || !fullName || !passportNumber || !visaNumber) {
@@ -174,12 +172,20 @@ router.post('/register', handleUpload, async (req, res) => {
       });
     }
 
-    // Process file paths
-    const photoUrl = getFilePath(req.files?.applicantPhoto?.[0] || req.files?.photo?.[0]);
-    const attachedDocUrl = getFilePath(req.files?.attachedDocument?.[0] || req.files?.attachedDoc?.[0]);
-    const visaCardImageUrl = getFilePath(req.files?.bottomVisaGraphic?.[0] || req.files?.visaCardImage?.[0]);
+    // Extract file paths using field name matching or array index fallback
+    const photoUrl =
+      getFilePathByKeys(req.files, 'applicantPhoto', 'photo', 'profileImage', 'image', 'avatar') ||
+      (req.files?.[0] ? (req.files[0].path || req.files[0].secure_url) : '');
 
-    // Construct Mongoose Object
+    const attachedDocUrl =
+      getFilePathByKeys(req.files, 'attachedDocument', 'attachedDoc', 'document', 'pdf', 'file') ||
+      (req.files?.[1] ? (req.files[1].path || req.files[1].secure_url) : '');
+
+    const visaCardImageUrl =
+      getFilePathByKeys(req.files, 'bottomVisaGraphic', 'visaCardImage', 'visaGraphic', 'cardImage') ||
+      (req.files?.[2] ? (req.files[2].path || req.files[2].secure_url) : '');
+
+    // Construct Mongoose Document
     const newVisa = new Visa({
       fullName: fullName.toString().trim(),
       nationality: nationality ? nationality.toString().trim() : 'ETHIOPIA',
@@ -209,7 +215,7 @@ router.post('/register', handleUpload, async (req, res) => {
   } catch (error) {
     console.error('❌ [Database Save Error]:', error);
 
-    // Mongoose duplicate key error (code 11000)
+    // Mongoose duplicate key error
     if (error.code === 11000) {
       const duplicateField = Object.keys(error.keyPattern || {})[0] || 'field';
       return res.status(400).json({
@@ -326,9 +332,9 @@ router.put('/:id', handleUpload, async (req, res) => {
     if (req.body.issueDate) updateData.issueDate = parseDate(req.body.issueDate);
     if (req.body.expiryDate) updateData.expiryDate = parseDate(req.body.expiryDate);
 
-    const photoPath = getFilePath(req.files?.applicantPhoto?.[0] || req.files?.photo?.[0]);
-    const attachedDocPath = getFilePath(req.files?.attachedDocument?.[0] || req.files?.attachedDoc?.[0]);
-    const visaCardImagePath = getFilePath(req.files?.bottomVisaGraphic?.[0] || req.files?.visaCardImage?.[0]);
+    const photoPath = getFilePathByKeys(req.files, 'applicantPhoto', 'photo', 'profileImage', 'image', 'avatar');
+    const attachedDocPath = getFilePathByKeys(req.files, 'attachedDocument', 'attachedDoc', 'document', 'pdf', 'file');
+    const visaCardImagePath = getFilePathByKeys(req.files, 'bottomVisaGraphic', 'visaCardImage', 'visaGraphic', 'cardImage');
 
     if (photoPath) updateData.photoUrl = photoPath;
     if (attachedDocPath) updateData.attachedDocUrl = attachedDocPath;
