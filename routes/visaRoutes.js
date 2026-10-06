@@ -3,25 +3,68 @@ const express = require('express');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const path = require('path');
 const Visa = require('../models/Visa');
 
 const router = express.Router();
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
+// Verify Cloudinary Environment Variables
+const hasCloudinaryKeys = 
+  Boolean(process.env.CLOUDINARY_CLOUD_NAME) && 
+  Boolean(process.env.CLOUDINARY_API_KEY) && 
+  Boolean(process.env.CLOUDINARY_API_SECRET);
+
+let storage;
+
+if (hasCloudinaryKeys) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+  });
+
+  storage = new CloudinaryStorage({
+    cloudinary: cloudinary,
+    params: {
+      folder: 'visa_verification_docs',
+      allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf'],
+    },
+  });
+} else {
+  console.warn('⚠️ Cloudinary keys missing! Falling back to local disk storage in /uploads');
+  storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, 'uploads/'),
+    filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`)
+  });
+}
+
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB Limit
 });
 
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'visa_verification_docs',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf'],
-  },
-});
+// Middleware wrapper to intercept Multer / Cloudinary upload errors gracefully
+const handleUpload = (req, res, next) => {
+  const uploadFields = upload.fields([
+    { name: 'photo', maxCount: 1 },
+    { name: 'attachedDoc', maxCount: 1 },
+    { name: 'visaCardImage', maxCount: 1 },
+    { name: 'applicantPhoto', maxCount: 1 },
+    { name: 'attachedDocument', maxCount: 1 },
+    { name: 'bottomVisaGraphic', maxCount: 1 },
+  ]);
 
-const upload = multer({ storage });
+  uploadFields(req, res, (err) => {
+    if (err) {
+      console.error('[Multer/Cloudinary Error]:', err);
+      return res.status(400).json({
+        success: false,
+        message: `Image upload failed: ${err.message || 'Error processing files.'}`
+      });
+    }
+    next();
+  });
+};
 
 const parseDate = (dateStr) => {
   if (!dateStr) return undefined;
@@ -29,7 +72,7 @@ const parseDate = (dateStr) => {
   return isNaN(parsed.getTime()) ? undefined : parsed;
 };
 
-// 1. Admin Login Endpoint (Unified payload structure)
+// 1. Admin Login Endpoint
 router.post('/admin/login', (req, res) => {
   console.log('[Admin Login Request Payload]:', req.body);
 
@@ -79,123 +122,102 @@ router.post('/admin/login', (req, res) => {
   });
 });
 
+// Helper function to extract file URL/Path
+const getFilePath = (file) => {
+  if (!file) return '';
+  return file.path || file.secure_url || `/uploads/${file.filename}`;
+};
+
 // 2. Register New Visa Record
-router.post(
-  '/register',
-  upload.fields([
-    // Legacy / Alternative form keys
-    { name: 'photo', maxCount: 1 },
-    { name: 'attachedDoc', maxCount: 1 },
-    { name: 'visaCardImage', maxCount: 1 },
-    // Frontend form keys
-    { name: 'applicantPhoto', maxCount: 1 },
-    { name: 'attachedDocument', maxCount: 1 },
-    { name: 'bottomVisaGraphic', maxCount: 1 },
-  ]),
-  async (req, res) => {
-    try {
-      const {
-        fullName,
-        nationality,
-        passcode,
-        otp, // Added OTP fallback
-        visaNumber,
-        passportNumber,
-        visaType,
-        occupation,
-        gender,
-        birthDate,
-        issueDate,
-        expiryDate,
-      } = req.body;
+router.post('/register', handleUpload, async (req, res) => {
+  try {
+    const {
+      fullName,
+      nationality,
+      passcode,
+      otp,
+      visaNumber,
+      passportNumber,
+      visaType,
+      occupation,
+      gender,
+      birthDate,
+      issueDate,
+      expiryDate,
+    } = req.body;
 
-      // Support either passcode or otp
-      const rawPasscode = passcode || otp;
+    const rawPasscode = passcode || otp;
 
-      if (!rawPasscode || !fullName || !passportNumber || !visaNumber) {
-        return res.status(400).json({
-          success: false,
-          message: 'Required fields are missing (Passcode/OTP, Full Name, Passport, or Visa Number).',
-        });
-      }
-
-      const cleanPasscode = rawPasscode.toString().trim();
-
-      const existing = await Visa.findOne({
-        passcode: { $regex: `^${cleanPasscode}$`, $options: 'i' },
-      });
-
-      if (existing) {
-        return res.status(400).json({
-          success: false,
-          message: 'Access Code / OTP (Passcode) already exists.',
-        });
-      }
-
-      // Read URLs dynamically regardless of which key name was sent
-      const photoUrl =
-        req.files?.applicantPhoto?.[0]?.path ||
-        req.files?.photo?.[0]?.path ||
-        '';
-
-      const attachedDocUrl =
-        req.files?.attachedDocument?.[0]?.path ||
-        req.files?.attachedDoc?.[0]?.path ||
-        '';
-
-      const visaCardImageUrl =
-        req.files?.bottomVisaGraphic?.[0]?.path ||
-        req.files?.visaCardImage?.[0]?.path ||
-        '';
-
-      const newVisa = new Visa({
-        fullName: fullName.toString().trim(),
-        nationality: nationality ? nationality.toString().trim() : 'ETHIOPIA',
-        passcode: cleanPasscode,
-        visaNumber: visaNumber.toString().trim(),
-        passportNumber: passportNumber.toString().trim(),
-        visaType: visaType ? visaType.toString().trim() : '',
-        occupation: occupation ? occupation.toString().trim() : '',
-        gender: gender ? gender.toString().trim() : '',
-        birthDate: parseDate(birthDate),
-        issueDate: parseDate(issueDate),
-        expiryDate: parseDate(expiryDate),
-        photoUrl,
-        attachedDocUrl,
-        visaCardImageUrl,
-      });
-
-      await newVisa.save();
-
-      return res.status(201).json({
-        success: true,
-        message: 'Visa Record Registered Successfully!',
-        data: newVisa,
-      });
-    } catch (error) {
-      console.error('Registration error:', error);
-
-      if (error.code === 11000) {
-        const duplicateField = Object.keys(error.keyPattern || {})[0] || 'field';
-        return res.status(400).json({
-          success: false,
-          message: `A record with this ${duplicateField} already exists.`,
-        });
-      }
-
-      return res.status(500).json({
+    if (!rawPasscode || !fullName || !passportNumber || !visaNumber) {
+      return res.status(400).json({
         success: false,
-        message: error.message || 'Failed to register visa record.',
+        message: 'Required fields are missing (Passcode/OTP, Full Name, Passport, or Visa Number).',
       });
     }
-  }
-);
 
-// 3. Public Verification / OTP Search
+    const cleanPasscode = rawPasscode.toString().trim();
+
+    const existing = await Visa.findOne({
+      passcode: { $regex: `^${cleanPasscode}$`, $options: 'i' },
+    });
+
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: 'Access Code / OTP (Passcode) already exists.',
+      });
+    }
+
+    const photoUrl = getFilePath(req.files?.applicantPhoto?.[0] || req.files?.photo?.[0]);
+    const attachedDocUrl = getFilePath(req.files?.attachedDocument?.[0] || req.files?.attachedDoc?.[0]);
+    const visaCardImageUrl = getFilePath(req.files?.bottomVisaGraphic?.[0] || req.files?.visaCardImage?.[0]);
+
+    const newVisa = new Visa({
+      fullName: fullName.toString().trim(),
+      nationality: nationality ? nationality.toString().trim() : 'ETHIOPIA',
+      passcode: cleanPasscode,
+      visaNumber: visaNumber.toString().trim(),
+      passportNumber: passportNumber.toString().trim(),
+      visaType: visaType ? visaType.toString().trim() : '',
+      occupation: occupation ? occupation.toString().trim() : '',
+      gender: gender ? gender.toString().trim() : '',
+      birthDate: parseDate(birthDate),
+      issueDate: parseDate(issueDate),
+      expiryDate: parseDate(expiryDate),
+      photoUrl,
+      attachedDocUrl,
+      visaCardImageUrl,
+    });
+
+    await newVisa.save();
+
+    return res.status(201).json({
+      success: true,
+      message: 'Visa Record Registered Successfully!',
+      data: newVisa,
+    });
+  } catch (error) {
+    console.error('Registration database error:', error);
+
+    if (error.code === 11000) {
+      const duplicateField = Object.keys(error.keyPattern || {})[0] || 'field';
+      return res.status(400).json({
+        success: false,
+        message: `A record with this ${duplicateField} already exists.`,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to register visa record.',
+    });
+  }
+});
+
+// 3. Public Verification Endpoint
 const handleVerification = async (req, res) => {
   try {
     const payload = { ...req.query, ...req.body };
-    console.log('[Verification Payload Received]:', payload);
 
     const inputPasscode = (
       payload.passcode ||
@@ -269,51 +291,40 @@ router.get('/all', async (req, res) => {
 });
 
 // 5. Update Visa Record
-router.put(
-  '/:id',
-  upload.fields([
-    { name: 'photo', maxCount: 1 },
-    { name: 'attachedDoc', maxCount: 1 },
-    { name: 'visaCardImage', maxCount: 1 },
-    { name: 'applicantPhoto', maxCount: 1 },
-    { name: 'attachedDocument', maxCount: 1 },
-    { name: 'bottomVisaGraphic', maxCount: 1 },
-  ]),
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const existingRecord = await Visa.findById(id);
+router.put('/:id', handleUpload, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existingRecord = await Visa.findById(id);
 
-      if (!existingRecord) {
-        return res.status(404).json({ success: false, message: 'Visa record not found.' });
-      }
-
-      const updateData = { ...req.body };
-
-      if (req.body.birthDate) updateData.birthDate = parseDate(req.body.birthDate);
-      if (req.body.issueDate) updateData.issueDate = parseDate(req.body.issueDate);
-      if (req.body.expiryDate) updateData.expiryDate = parseDate(req.body.expiryDate);
-
-      const photoPath = req.files?.applicantPhoto?.[0]?.path || req.files?.photo?.[0]?.path;
-      const attachedDocPath = req.files?.attachedDocument?.[0]?.path || req.files?.attachedDoc?.[0]?.path;
-      const visaCardImagePath = req.files?.bottomVisaGraphic?.[0]?.path || req.files?.visaCardImage?.[0]?.path;
-
-      if (photoPath) updateData.photoUrl = photoPath;
-      if (attachedDocPath) updateData.attachedDocUrl = attachedDocPath;
-      if (visaCardImagePath) updateData.visaCardImageUrl = visaCardImagePath;
-
-      const updatedVisa = await Visa.findByIdAndUpdate(id, updateData, { new: true });
-
-      return res.status(200).json({
-        success: true,
-        message: 'Visa record updated successfully.',
-        data: updatedVisa,
-      });
-    } catch (error) {
-      return res.status(500).json({ success: false, message: error.message || 'Update failed.' });
+    if (!existingRecord) {
+      return res.status(404).json({ success: false, message: 'Visa record not found.' });
     }
+
+    const updateData = { ...req.body };
+
+    if (req.body.birthDate) updateData.birthDate = parseDate(req.body.birthDate);
+    if (req.body.issueDate) updateData.issueDate = parseDate(req.body.issueDate);
+    if (req.body.expiryDate) updateData.expiryDate = parseDate(req.body.expiryDate);
+
+    const photoPath = getFilePath(req.files?.applicantPhoto?.[0] || req.files?.photo?.[0]);
+    const attachedDocPath = getFilePath(req.files?.attachedDocument?.[0] || req.files?.attachedDoc?.[0]);
+    const visaCardImagePath = getFilePath(req.files?.bottomVisaGraphic?.[0] || req.files?.visaCardImage?.[0]);
+
+    if (photoPath) updateData.photoUrl = photoPath;
+    if (attachedDocPath) updateData.attachedDocUrl = attachedDocPath;
+    if (visaCardImagePath) updateData.visaCardImageUrl = visaCardImagePath;
+
+    const updatedVisa = await Visa.findByIdAndUpdate(id, updateData, { new: true });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Visa record updated successfully.',
+      data: updatedVisa,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Update failed.' });
   }
-);
+});
 
 // 6. Delete Visa Record
 router.delete('/:id', async (req, res) => {

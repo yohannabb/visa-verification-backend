@@ -3,9 +3,6 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
 const fs = require('fs');
-const { v2: cloudinary } = require('cloudinary');
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const multer = require('multer');
 const connectDB = require('./config/db');
 
 // Load environment variables
@@ -13,29 +10,6 @@ dotenv.config();
 
 // Connect to MongoDB Atlas
 connectDB();
-
-// Verify Cloudinary Credentials on Startup
-if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-  console.warn('⚠️ Warning: Cloudinary environment variables are missing in process.env!');
-}
-
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-// Configure Multer Storage for Cloudinary
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'visa_verification_docs',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf'],
-  },
-});
-
-const upload = multer({ storage });
 
 const app = express();
 
@@ -56,7 +30,6 @@ if (process.env.CLIENT_URL) {
 // Strict CORS Configuration
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow non-browser calls (like Postman, mobile apps, curl) or matched origins
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     }
@@ -78,7 +51,7 @@ try {
     fs.mkdirSync(uploadsPath, { recursive: true });
   }
 } catch (err) {
-  console.warn('ℹ️ Local uploads folder could not be initialized (using Cloudinary storage instead).');
+  console.warn('ℹ️ Local uploads folder could not be initialized.');
 }
 
 app.use('/uploads', express.static(uploadsPath, {
@@ -87,8 +60,6 @@ app.use('/uploads', express.static(uploadsPath, {
     res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   }
 }));
-
-app.set('upload', upload);
 
 // Mount API Routes
 app.use('/api/auth', require('./routes/authRoutes'));
@@ -104,9 +75,18 @@ app.use((req, res) => {
   res.status(404).json({ success: false, message: 'API route not found' });
 });
 
-// Global Error Handling Middleware
+// Global Error Handling Middleware (Returns the EXACT error message to frontend)
 app.use((err, req, res, next) => {
-  console.error('Unhandled Error:', err.message);
+  console.error('Unhandled Error:', err);
+  
+  // Handle Multer/Cloudinary specific errors
+  if (err instanceof multer.MulterError || err.name === 'MulterError') {
+    return res.status(400).json({
+      success: false,
+      message: `File upload error: ${err.message}`
+    });
+  }
+
   res.status(err.status || 500).json({
     success: false,
     message: err.message || 'Internal Server Error'
