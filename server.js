@@ -3,7 +3,7 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
 const fs = require('fs');
-const multer = require('multer'); // Added missing multer import
+const multer = require('multer');
 const connectDB = require('./config/db');
 
 // Load environment variables
@@ -14,24 +14,31 @@ connectDB();
 
 const app = express();
 
-// Allowed Origins List
+// Allowed Origins List (Without trailing slashes)
 const allowedOrigins = [
-  'https://habeshatravel.netlify.app/',
+  'https://habeshatravel.netlify.app',
+  'https://mols-doc-checker.netlify.app',
   'http://localhost:5173',
   'http://localhost:3000'
 ];
 
 if (process.env.CLIENT_URL) {
-  const customOrigin = process.env.CLIENT_URL.trim();
+  const customOrigin = process.env.CLIENT_URL.trim().replace(/\/+$/, '');
   if (customOrigin && !allowedOrigins.includes(customOrigin)) {
     allowedOrigins.push(customOrigin);
   }
 }
 
-// Strict CORS Configuration
+// Strict CORS Configuration with trailing-slash normalization
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+    // Allow non-browser requests (Postman, curl, server-to-server)
+    if (!origin) return callback(null, true);
+    
+    // Normalize incoming origin by removing any trailing slash
+    const normalizedOrigin = origin.replace(/\/+$/, '');
+    
+    if (allowedOrigins.indexOf(normalizedOrigin) !== -1) {
       return callback(null, true);
     }
     return callback(new Error('CORS policy violation: Access denied for this origin.'));
@@ -80,7 +87,6 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   console.error('Unhandled Global Error:', err);
 
-  // Handle Multer specific errors safely without crashing
   if ((multer && err instanceof multer.MulterError) || err.name === 'MulterError') {
     return res.status(400).json({
       success: false,
