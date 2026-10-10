@@ -16,7 +16,7 @@ const app = express();
 
 // Allowed Origins List
 const allowedOrigins = [
-  'https://mols-doc-checker.netlify.app',
+  'https://habeshatravel.netlify.app/',
   'http://localhost:5173',
   'http://localhost:3000'
 ];
