@@ -14,39 +14,26 @@ connectDB();
 
 const app = express();
 
-// Allowed Origins List (Without trailing slashes)
-const allowedOrigins = [
-  'https://habeshatravel.netlify.app',
-  'https://mols-doc-checker.netlify.app',
-  'http://localhost:5173',
-  'http://localhost:3000'
-];
-
-if (process.env.CLIENT_URL) {
-  const customOrigin = process.env.CLIENT_URL.trim().replace(/\/+$/, '');
-  if (customOrigin && !allowedOrigins.includes(customOrigin)) {
-    allowedOrigins.push(customOrigin);
-  }
-}
-
-// Strict CORS Configuration with trailing-slash normalization
+// Permissive CORS configuration to accept requests from any frontend domain (Netlify, localhost, etc.)
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow non-browser requests (Postman, curl, server-to-server)
-    if (!origin) return callback(null, true);
-    
-    // Normalize incoming origin by removing any trailing slash
-    const normalizedOrigin = origin.replace(/\/+$/, '');
-    
-    if (allowedOrigins.indexOf(normalizedOrigin) !== -1) {
-      return callback(null, true);
-    }
-    return callback(new Error('CORS policy violation: Access denied for this origin.'));
-  },
+  origin: true, // Automatically reflects the incoming request origin
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
+
+// Fallback safety middleware to ensure CORS headers are always attached even on preflight or exceptions
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
 // Enable body parsing BEFORE routes
 app.use(express.json({ limit: '50mb' }));
